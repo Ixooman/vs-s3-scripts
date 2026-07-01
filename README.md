@@ -44,7 +44,7 @@
 
 - `jq`, `split`, `md5sum`, GNU `stat`, `dd`, `cat` для `spec_methods_tester.sh`
 - `dd`, `md5sum`, `awk`, `grep -P`, `xxd`, `head`, `tr` для multipart-скриптов
-- `dd`, `awk`, `head`, `tr` для bulk/size probe скриптов
+- `dd`, `awk`, `head`, `tr` для bulk/size probe скриптов; GNU `stat` нужен для `max_object_size_probe.sh`; `md5sum` и `mktemp` дополнительно нужны при использовании `--check`
 
 Пример настройки credentials:
 
@@ -265,17 +265,19 @@ Options:
 
 - `--endpoint <url>`: default `http://192.168.10.81`
 - `--cleanup`: удалить успешно загруженные объекты
+- `--check`: после каждой успешной загрузки скачать объект и сравнить MD5 с исходным файлом; несовпадение считается ошибкой и останавливает цикл
 - `-h`, `--help`: help
 
 Size units: `kb`, `mb`, `gb`.
 
-Example:
+Examples:
 
 ```bash
 ./max_object_size_probe.sh --bucket test-bucket --min 1mb --max 100mb --step 5mb --cleanup
+./max_object_size_probe.sh --bucket test-bucket --min 1mb --max 100mb --step 5mb --cleanup --check
 ```
 
-Скрипт генерирует локальный файл для каждого размера, загружает его через `put-object`, удаляет локальный файл и печатает максимальный успешно загруженный размер.
+Скрипт генерирует локальный файл для каждого размера, загружает его через `put-object`, удаляет локальный файл и печатает максимальный успешно загруженный размер. При `--check` объект скачивается во временный файл и сравнивается по MD5; временный файл удаляется независимо от результата проверки.
 
 ### `put_bunch_objects.sh`
 

@@ -16,6 +16,7 @@ MIN_SIZE=""
 MAX_SIZE=""
 STEP=""
 CLEANUP=false
+CHECK=false
 MAX_RETRIES=3
 
 # Arrays to track results
@@ -36,12 +37,14 @@ Required arguments:
 Optional arguments:
   --endpoint <url>      S3 endpoint URL (default: http://192.168.10.81)
   --cleanup             Delete uploaded objects after testing
+  --check               After each upload, download and verify integrity via MD5
   -h, --help            Show this help message
 
 Size units: kb (KiB), mb (MiB), gb (GiB)
 
 Example:
   $0 --bucket test-bucket --min 1mb --max 100mb --step 5mb --cleanup
+  $0 --bucket test-bucket --min 1mb --max 100mb --step 5mb --cleanup --check
 
 AWS Credentials:
   The script uses AWS CLI's standard credential resolution:
@@ -141,16 +144,36 @@ generate_random_suffix() {
 create_test_file() {
     local size_bytes=$1
     local filename=$2
+    local full_mb=$((size_bytes / 1048576))
+    local remainder=$((size_bytes % 1048576))
 
     echo -e "${BLUE}Generating $filename ($(format_size $size_bytes))...${NC}"
 
-    if ! dd if=/dev/urandom of="$filename" bs=1M count=$((size_bytes / 1048576)) iflag=fullblock 2>/dev/null; then
-        # Fallback for sizes smaller than 1MB or exact byte sizes
-        dd if=/dev/urandom of="$filename" bs=1 count="$size_bytes" 2>/dev/null
+    if ((full_mb > 0)); then
+        if ! dd if=/dev/urandom of="$filename" bs=1M count="$full_mb" iflag=fullblock 2>/dev/null; then
+            echo -e "${RED}Error: Failed to write full MB blocks to test file${NC}" >&2
+            return 1
+        fi
+    fi
+
+    if ((remainder > 0)); then
+        # parse_size outputs are always multiples of 1024, so remainder is always a multiple of 1024
+        if ! dd if=/dev/urandom bs=1024 count=$((remainder / 1024)) iflag=fullblock 2>/dev/null >> "$filename"; then
+            echo -e "${RED}Error: Failed to write remainder bytes to test file${NC}" >&2
+            return 1
+        fi
     fi
 
     if [[ ! -f "$filename" ]]; then
         echo -e "${RED}Error: Failed to create test file${NC}" >&2
+        return 1
+    fi
+
+    local actual_size
+    actual_size=$(stat -c%s "$filename")
+    if [[ "$actual_size" != "$size_bytes" ]]; then
+        echo -e "${RED}Error: File size mismatch: expected $size_bytes bytes, got $actual_size bytes${NC}" >&2
+        rm -f "$filename"
         return 1
     fi
 }
@@ -225,6 +248,42 @@ cleanup_s3_objects() {
     done
 }
 
+# Download uploaded object and compare MD5 against local source file
+verify_upload() {
+    local local_file=$1
+    local s3_key=$2
+    local dl_file
+    dl_file=$(mktemp)
+
+    echo -e "${BLUE}Verifying upload via MD5...${NC}"
+
+    if ! aws s3api get-object \
+        --bucket "$BUCKET" \
+        --key "$s3_key" \
+        --endpoint-url "$ENDPOINT" \
+        --no-verify-ssl \
+        "$dl_file" >/dev/null 2>&1; then
+        echo -e "${RED}✗ Verification failed: could not download object${NC}"
+        rm -f "$dl_file"
+        return 1
+    fi
+
+    local orig_md5 dl_md5
+    orig_md5=$(md5sum "$local_file" | awk '{print $1}')
+    dl_md5=$(md5sum "$dl_file" | awk '{print $1}')
+    rm -f "$dl_file"
+
+    if [[ "$orig_md5" == "$dl_md5" ]]; then
+        echo -e "${GREEN}✓ Verification passed (MD5: $orig_md5)${NC}"
+        return 0
+    else
+        echo -e "${RED}✗ Verification failed: MD5 mismatch${NC}"
+        echo -e "  Original:   $orig_md5"
+        echo -e "  Downloaded: $dl_md5"
+        return 1
+    fi
+}
+
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -250,6 +309,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --cleanup)
             CLEANUP=true
+            shift
+            ;;
+        --check)
+            CHECK=true
             shift
             ;;
         -h|--help)
@@ -310,6 +373,7 @@ echo -e "Min size:    $(format_size $MIN_BYTES)"
 echo -e "Max size:    $(format_size $MAX_BYTES)"
 echo -e "Step:        $(format_size $STEP_BYTES)"
 echo -e "Cleanup:     $CLEANUP"
+echo -e "Check:       $CHECK"
 echo -e "${BLUE}========================================${NC}"
 echo ""
 
@@ -369,9 +433,22 @@ while ((current_bytes <= MAX_BYTES)); do
         upload_end=$(date +%s)
         upload_duration=$((upload_end - upload_start))
 
-        max_successful_bytes=$current_bytes
         UPLOADED_FILES+=("$s3_key")
-        TEST_RESULTS+=("$(format_size $current_bytes): SUCCESS (${upload_duration}s)")
+
+        if [[ "$CHECK" == true ]]; then
+            if verify_upload "$filename" "$s3_key"; then
+                max_successful_bytes=$current_bytes
+                TEST_RESULTS+=("$(format_size $current_bytes): SUCCESS (${upload_duration}s)")
+            else
+                TEST_RESULTS+=("$(format_size $current_bytes): FAILED (verify)")
+                cleanup_local_file "$filename"
+                echo -e "${RED}Verification failed, stopping tests${NC}"
+                break
+            fi
+        else
+            max_successful_bytes=$current_bytes
+            TEST_RESULTS+=("$(format_size $current_bytes): SUCCESS (${upload_duration}s)")
+        fi
     else
         TEST_RESULTS+=("$(format_size $current_bytes): FAILED")
         cleanup_local_file "$filename"
