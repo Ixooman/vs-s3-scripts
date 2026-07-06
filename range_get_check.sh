@@ -16,6 +16,7 @@ OBJECT_SIZE=""
 GETS=100
 MULTIPART=false
 RANGE_MAX="16mb"
+RANDOM_ONLY=false
 CLEANUP=false
 DEBUG=false
 MAX_RETRIES=3
@@ -58,6 +59,7 @@ Optional arguments:
   --gets <count>        Number of random ranged GetObject calls (default: 100)
   --multipart           Upload the object using multipart upload
   --range-max <size>    Maximum size of a random range (e.g., 1mb, 16mb) (default: 16mb)
+  --random-only         Skip deterministic boundary tests, run only random ranges
   --endpoint <url>      S3 endpoint URL (default: http://192.168.10.81)
   --cleanup             Delete uploaded object after testing
   --debug               Show full AWS CLI commands and responses
@@ -81,10 +83,14 @@ Description:
   range starts at a random offset within the object, has a length between 1
   byte and --range-max, and never extends past the end of the object.
 
+  --random-only skips all deterministic boundary cases (including multipart
+  part-boundary cases) and runs only the --gets random ranges.
+
 Examples:
   $0 --bucket test-bucket --size 100mb
   $0 --bucket test-bucket --size 500mb --multipart --gets 200 --cleanup
   $0 --bucket test-bucket --size 1gb --multipart --range-max 32mb --debug
+  $0 --bucket test-bucket --size 200mb --random-only --gets 500
 
 AWS Credentials:
   The script uses AWS CLI's standard credential resolution:
@@ -709,6 +715,10 @@ while [[ $# -gt 0 ]]; do
             RANGE_MAX="$2"
             shift 2
             ;;
+        --random-only)
+            RANDOM_ONLY=true
+            shift
+            ;;
         --endpoint)
             ENDPOINT="$2"
             shift 2
@@ -773,6 +783,7 @@ echo -e "Object size:     $(format_size "$OBJECT_SIZE_BYTES")"
 echo -e "Upload mode:     $([ "$MULTIPART" = true ] && echo "multipart" || echo "put-object")"
 echo -e "Random GETs:     $GETS"
 echo -e "Max range size:  $(format_size "$RANGE_MAX_BYTES")"
+echo -e "Random only:     $RANDOM_ONLY"
 echo -e "Cleanup:         $CLEANUP"
 echo -e "Debug:           $DEBUG"
 echo -e "${BLUE}========================================${NC}"
@@ -841,15 +852,19 @@ UPLOADED=true
 echo ""
 
 # Build and run range test cases
-echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}Deterministic boundary tests${NC}"
-echo -e "${BLUE}========================================${NC}"
+if [[ "$RANDOM_ONLY" == true ]]; then
+    echo -e "${YELLOW}Skipping deterministic boundary tests (--random-only)${NC}"
+else
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}Deterministic boundary tests${NC}"
+    echo -e "${BLUE}========================================${NC}"
 
-generate_deterministic_cases
+    generate_deterministic_cases
 
-for ((i=0; i<${#CASE_LABELS[@]}; i++)); do
-    run_range_test "${CASE_LABELS[$i]}" "${CASE_STARTS[$i]}" "${CASE_ENDS[$i]}" || true
-done
+    for ((i=0; i<${#CASE_LABELS[@]}; i++)); do
+        run_range_test "${CASE_LABELS[$i]}" "${CASE_STARTS[$i]}" "${CASE_ENDS[$i]}" || true
+    done
+fi
 
 echo ""
 echo -e "${BLUE}========================================${NC}"
