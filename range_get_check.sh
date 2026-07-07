@@ -58,19 +58,26 @@ Required arguments:
 Optional arguments:
   --gets <count>        Number of random ranged GetObject calls (default: 100)
   --multipart           Upload the object using multipart upload
-  --range-max <size>    Maximum size of a random range (e.g., 1mb, 16mb) (default: 16mb)
+  --range-max <size>    Maximum size of a random range (e.g., 64kb, 1mb, 16mb) (default: 16mb)
   --random-only         Skip deterministic boundary tests, run only random ranges
   --endpoint <url>      S3 endpoint URL (default: http://192.168.10.81)
   --cleanup             Delete uploaded object after testing
   --debug               Show full AWS CLI commands and responses
   -h, --help            Show this help message
 
-Size units: mb (MiB), gb (GiB)
+Size units:
+  --size: mb (MiB), gb (GiB)
+  --range-max: kb (KiB), mb (MiB), gb (GiB)
 
 Description:
   Uploads a single test object (regular put-object, or multipart upload with
   --multipart), then issues ranged GetObject requests against it and verifies
   that the returned bytes match the corresponding slice of the original data.
+
+  For each successful ranged GetObject, the response's ContentLength and
+  ContentRange metadata (from the AWS CLI JSON output) are validated against
+  the requested range. AcceptRanges is checked when present, but a missing
+  AcceptRanges only prints a warning and does not fail the test.
 
   Deterministic boundary cases are always tested first: first byte, a small
   prefix, the last byte, and a tail range. When --multipart is used, boundary
@@ -90,6 +97,7 @@ Examples:
   $0 --bucket test-bucket --size 100mb
   $0 --bucket test-bucket --size 500mb --multipart --gets 200 --cleanup
   $0 --bucket test-bucket --size 1gb --multipart --range-max 32mb --debug
+  $0 --bucket test-bucket --size 100mb --range-max 64kb --gets 300
   $0 --bucket test-bucket --size 200mb --random-only --gets 500
 
 AWS Credentials:
@@ -118,6 +126,34 @@ parse_size() {
     fi
 
     case $unit in
+        mb)
+            echo $((value * 1024 * 1024))
+            ;;
+        gb)
+            echo $((value * 1024 * 1024 * 1024))
+            ;;
+    esac
+}
+
+# Parse size with unit (kb, mb, gb) and convert to bytes; used for
+# --range-max, which additionally accepts kb (KiB) unlike --size
+parse_range_size() {
+    local size_str=$1
+    local value
+    local unit
+
+    if [[ $size_str =~ ^([0-9]+)(kb|mb|gb)$ ]]; then
+        value="${BASH_REMATCH[1]}"
+        unit="${BASH_REMATCH[2]}"
+    else
+        echo -e "${RED}Error: Invalid --range-max format '$size_str'. Use format: <number><unit> (e.g., 64kb, 1mb, 16mb). Accepted units: kb, mb, gb${NC}" >&2
+        exit 1
+    fi
+
+    case $unit in
+        kb)
+            echo $((value * 1024))
+            ;;
         mb)
             echo $((value * 1024 * 1024))
             ;;
@@ -560,7 +596,7 @@ random_range() {
     echo "$start $((start + length - 1))"
 }
 
-# Run a single ranged GetObject and verify size + content
+# Run a single ranged GetObject and verify metadata + size + content
 run_range_test() {
     local label=$1
     local start=$2
@@ -568,11 +604,13 @@ run_range_test() {
     local expected_len=$((end - start + 1))
     local download_file
     local expected_file
+    local stderr_file
     download_file="/tmp/range_dl_$(generate_random_suffix).data"
     expected_file="/tmp/range_exp_$(generate_random_suffix).data"
-    local output result actual_len
+    stderr_file="/tmp/range_stderr_$(generate_random_suffix).log"
+    local output stderr_output result actual_len
 
-    TEMP_FILES+=("$download_file" "$expected_file")
+    TEMP_FILES+=("$download_file" "$expected_file" "$stderr_file")
     TEST_COUNT=$((TEST_COUNT + 1))
 
     local cmd="aws s3api get-object --bucket \"$BUCKET\" --key \"$S3_KEY\" --range \"bytes=${start}-${end}\" --endpoint-url \"$ENDPOINT\" --no-verify-ssl \"$download_file\""
@@ -580,6 +618,10 @@ run_range_test() {
         echo -e "${YELLOW}[DEBUG] Command: $cmd${NC}" >&2
     fi
 
+    # Stdout and stderr are captured separately (rather than merged) so that
+    # $output stays clean JSON that can be parsed with jq for metadata
+    # validation, even if the CLI writes warnings (e.g. for --no-verify-ssl)
+    # to stderr.
     result=0
     output=$(aws s3api get-object \
         --bucket "$BUCKET" \
@@ -587,19 +629,80 @@ run_range_test() {
         --range "bytes=${start}-${end}" \
         --endpoint-url "$ENDPOINT" \
         --no-verify-ssl \
-        "$download_file" 2>&1) || result=$?
+        "$download_file" 2>"$stderr_file") || result=$?
+
+    stderr_output=""
+    if [[ -s "$stderr_file" ]]; then
+        stderr_output=$(cat "$stderr_file")
+    fi
 
     if [[ "$DEBUG" == true ]]; then
         echo -e "${YELLOW}[DEBUG] Exit code: $result${NC}" >&2
         echo -e "${YELLOW}[DEBUG] Response: $output${NC}" >&2
+        if [[ -n "$stderr_output" ]]; then
+            echo -e "${YELLOW}[DEBUG] Stderr: $stderr_output${NC}" >&2
+        fi
     fi
 
     if ((result != 0)); then
         echo -e "${RED}✗ FAIL${NC} [$label] bytes=${start}-${end} (expected ${expected_len}B) - GetObject request failed"
         echo "$output" >&2
+        if [[ -n "$stderr_output" ]]; then
+            echo "$stderr_output" >&2
+        fi
         FAIL_COUNT=$((FAIL_COUNT + 1))
         FAILED_CASES+=("$label (bytes=${start}-${end})")
-        rm -f "$download_file" "$expected_file"
+        rm -f "$download_file" "$expected_file" "$stderr_file"
+        return 1
+    fi
+
+    # Validate first-level response metadata from the JSON returned on stdout
+    local expected_content_range="bytes ${start}-${end}/${OBJECT_SIZE_BYTES}"
+    local content_length_actual content_range_actual accept_ranges_actual
+
+    content_length_actual=$(echo "$output" | jq -r '.ContentLength // empty' 2>/dev/null) || content_length_actual=""
+    content_range_actual=$(echo "$output" | jq -r '.ContentRange // empty' 2>/dev/null) || content_range_actual=""
+    accept_ranges_actual=$(echo "$output" | jq -r '.AcceptRanges // empty' 2>/dev/null) || accept_ranges_actual=""
+
+    if [[ -z "$content_length_actual" ]]; then
+        echo -e "${RED}✗ FAIL${NC} [$label] bytes=${start}-${end} - ContentLength missing in response (expected: ${expected_len})"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        FAILED_CASES+=("$label (bytes=${start}-${end}) - ContentLength missing")
+        rm -f "$download_file" "$expected_file" "$stderr_file"
+        return 1
+    fi
+
+    if ! [[ "$content_length_actual" =~ ^[0-9]+$ ]] || ((content_length_actual != expected_len)); then
+        echo -e "${RED}✗ FAIL${NC} [$label] bytes=${start}-${end} - ContentLength mismatch (expected: ${expected_len}, actual: ${content_length_actual})"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        FAILED_CASES+=("$label (bytes=${start}-${end}) - ContentLength mismatch")
+        rm -f "$download_file" "$expected_file" "$stderr_file"
+        return 1
+    fi
+
+    if [[ -z "$content_range_actual" ]]; then
+        echo -e "${RED}✗ FAIL${NC} [$label] bytes=${start}-${end} - ContentRange missing in response (expected: ${expected_content_range})"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        FAILED_CASES+=("$label (bytes=${start}-${end}) - ContentRange missing")
+        rm -f "$download_file" "$expected_file" "$stderr_file"
+        return 1
+    fi
+
+    if [[ "$content_range_actual" != "$expected_content_range" ]]; then
+        echo -e "${RED}✗ FAIL${NC} [$label] bytes=${start}-${end} - ContentRange mismatch (expected: ${expected_content_range}, actual: ${content_range_actual})"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        FAILED_CASES+=("$label (bytes=${start}-${end}) - ContentRange mismatch")
+        rm -f "$download_file" "$expected_file" "$stderr_file"
+        return 1
+    fi
+
+    if [[ -z "$accept_ranges_actual" ]]; then
+        echo -e "${YELLOW}⚠ WARN${NC} [$label] bytes=${start}-${end} - AcceptRanges missing"
+    elif [[ "$accept_ranges_actual" != "bytes" ]]; then
+        echo -e "${RED}✗ FAIL${NC} [$label] bytes=${start}-${end} - AcceptRanges mismatch (expected: bytes, actual: ${accept_ranges_actual})"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        FAILED_CASES+=("$label (bytes=${start}-${end}) - AcceptRanges mismatch")
+        rm -f "$download_file" "$expected_file" "$stderr_file"
         return 1
     fi
 
@@ -612,7 +715,7 @@ run_range_test() {
         echo -e "${RED}✗ FAIL${NC} [$label] bytes=${start}-${end} expected ${expected_len}B, got ${actual_len}B (size mismatch)"
         FAIL_COUNT=$((FAIL_COUNT + 1))
         FAILED_CASES+=("$label (bytes=${start}-${end})")
-        rm -f "$download_file" "$expected_file"
+        rm -f "$download_file" "$expected_file" "$stderr_file"
         return 1
     fi
 
@@ -620,7 +723,7 @@ run_range_test() {
         echo -e "${RED}✗ FAIL${NC} [$label] bytes=${start}-${end} - failed to extract expected data for comparison"
         FAIL_COUNT=$((FAIL_COUNT + 1))
         FAILED_CASES+=("$label (bytes=${start}-${end})")
-        rm -f "$download_file" "$expected_file"
+        rm -f "$download_file" "$expected_file" "$stderr_file"
         return 1
     fi
 
@@ -630,13 +733,13 @@ run_range_test() {
         echo -e "${RED}✗ FAIL${NC} [$label] bytes=${start}-${end} expected ${expected_len}B, got ${actual_len}B - content mismatch ($diff_info)"
         FAIL_COUNT=$((FAIL_COUNT + 1))
         FAILED_CASES+=("$label (bytes=${start}-${end})")
-        rm -f "$download_file" "$expected_file"
+        rm -f "$download_file" "$expected_file" "$stderr_file"
         return 1
     fi
 
     echo -e "${GREEN}✓ PASS${NC} [$label] bytes=${start}-${end} (${expected_len}B)"
     PASS_COUNT=$((PASS_COUNT + 1))
-    rm -f "$download_file" "$expected_file"
+    rm -f "$download_file" "$expected_file" "$stderr_file"
 }
 
 # Cleanup S3 object
@@ -759,9 +862,15 @@ if ! command -v aws &> /dev/null; then
     exit 1
 fi
 
+# Check jq (used to parse GetObject response metadata for validation)
+if ! command -v jq &> /dev/null; then
+    echo -e "${RED}Error: jq is not installed${NC}" >&2
+    exit 1
+fi
+
 # Parse sizes
 OBJECT_SIZE_BYTES=$(parse_size "$OBJECT_SIZE")
-RANGE_MAX_BYTES=$(parse_size "$RANGE_MAX")
+RANGE_MAX_BYTES=$(parse_range_size "$RANGE_MAX")
 
 if ((OBJECT_SIZE_BYTES <= 0)); then
     echo -e "${RED}Error: Object size must be greater than 0${NC}" >&2

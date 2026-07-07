@@ -48,7 +48,7 @@
 - `jq`, `split`, `md5sum`, GNU `stat`, `dd`, `cat` для `spec_methods_tester.sh`
 - `dd`, `md5sum`, `awk`, `grep -P`, `xxd`, `head`, `tr` для multipart-скриптов
 - `dd`, `awk`, `head`, `tr` для bulk/size probe скриптов; GNU `stat` нужен для `max_object_size_probe.sh`; `md5sum` и `mktemp` дополнительно нужны при использовании `--check`
-- `dd` (с поддержкой `iflag=skip_bytes,count_bytes`), GNU `stat`, `cmp`, `od`, `awk`, `grep -P`, `tr` для `range_get_check.sh`
+- `dd` (с поддержкой `iflag=skip_bytes,count_bytes`), GNU `stat`, `cmp`, `od`, `awk`, `grep -P`, `tr`, `jq` для `range_get_check.sh`
 
 Пример настройки credentials:
 
@@ -71,7 +71,7 @@ aws configure set default.output json
 | `max_object_size_probe.sh` | `--endpoint`, default есть | `--bucket`, creates if missing | нет | `--cleanup` | `kb`, `mb`, `gb` |
 | `max_object_multipart_probe.sh` | `--endpoint`, default есть | `--bucket`, creates if missing | `--debug` | `--cleanup` | `mb`, `gb`, `tb` |
 | `put_bunch_objects.sh` | `--endpoint`, default есть | `--bucket`, creates if missing | `--debug` | `--cleanup` for S3 objects, trap for local templates | `kb`, `mb`, `gb` |
-| `range_get_check.sh` | `--endpoint`, default есть | `--bucket`, creates if missing | `--debug` | `--cleanup` for the object, trap for temp files/parts, abort for multipart uploads | `mb`, `gb` |
+| `range_get_check.sh` | `--endpoint`, default есть | `--bucket`, creates if missing | `--debug` | `--cleanup` for the object, trap for temp files/parts, abort for multipart uploads | `mb`, `gb` for `--size`; `kb`, `mb`, `gb` for `--range-max` |
 | `cleanup_all.sh` | positional, default есть | all buckets on endpoint | нет | destructive by design | нет |
 
 ## Connectivity and Compatibility
@@ -337,14 +337,14 @@ Options:
 
 - `--gets <count>`: количество случайных ranged GetObject-запросов, default `100`
 - `--multipart`: загрузить объект через multipart upload вместо обычного `put-object`
-- `--range-max <size>`: максимальный размер случайного диапазона, default `16mb`
+- `--range-max <size>`: максимальный размер случайного диапазона, например `64kb`, `1mb`, `16mb`, default `16mb`
 - `--random-only`: пропустить детерминированные проверки границ и выполнить только случайные ranged GetObject-запросы (`--gets`)
 - `--endpoint <url>`: default `http://192.168.10.81`
 - `--cleanup`: удалить загруженный S3 object после теста
 - `--debug`: печатать AWS CLI команды и ответы
 - `-h`, `--help`: help
 
-Size units: `mb`, `gb` (для `--size` и `--range-max`).
+Size units: `--size` принимает `mb`, `gb`; `--range-max` принимает `kb`, `mb`, `gb` (`kb` — KiB, значение * 1024 байт).
 
 Examples:
 
@@ -352,6 +352,7 @@ Examples:
 ./range_get_check.sh --bucket test-bucket --size 100mb
 ./range_get_check.sh --bucket test-bucket --size 500mb --multipart --gets 200 --cleanup
 ./range_get_check.sh --bucket test-bucket --size 1gb --multipart --range-max 32mb --debug
+./range_get_check.sh --bucket test-bucket --size 100mb --range-max 64kb --gets 300
 ./range_get_check.sh --bucket test-bucket --size 200mb --random-only --gets 500
 ```
 
@@ -361,9 +362,15 @@ Examples:
 2. Загружает его в S3 обычным `put-object`, либо через multipart upload при `--multipart`. Размер part для multipart подбирается автоматически (объект делится примерно на 8 частей, но не меньше 5MiB и не больше 10000 частей), part offsets и sizes всегда кратны 1MiB.
 3. Выполняет набор детерминированных проверок границ: первый байт, короткий префикс от начала, последний байт, диапазон в конце объекта. При `--multipart` дополнительно добавляются: диапазон целиком внутри одной part, диапазон, заканчивающийся точно на границе part, диапазон, начинающийся точно на границе part, диапазон, пересекающий одну границу part, и (если parts не меньше 3) диапазон, пересекающий несколько границ part. При `--random-only` этот шаг полностью пропускается (в том числе для multipart-границ).
 4. Выполняет `--gets` запросов со случайными диапазонами: случайное начало в пределах объекта, длина от 1 байта до `--range-max`, не выходящая за пределы объекта. Этот шаг выполняется всегда, в том числе при `--random-only`; при `--gets 0` случайных запросов не будет.
-5. Для каждого диапазона проверяет: успешность запроса, совпадение размера скачанных данных с ожидаемым, побайтовое совпадение с соответствующим срезом исходного файла.
+5. Для каждого диапазона проверяет: успешность запроса, метаданные ответа `GetObject` (JSON из stdout AWS CLI, разбирается через `jq`), совпадение размера скачанных данных с ожидаемым, побайтовое совпадение с соответствующим срезом исходного файла.
 
-Каждый диапазон печатается как `PASS` или `FAIL` с меткой, `start`, `end` и ожидаемой/фактической длиной; при несовпадении содержимого выводится байт первого расхождения (`cmp`). Скрипт не останавливается на первой ошибке — все проверки выполняются, а итоговый exit code ненулевой, если хотя бы одна проверка провалилась.
+Проверка метаданных ответа (только top-level поля, без разбора HTTP статус-кода и без использования `--debug`-вывода AWS CLI):
+
+- `ContentLength`: обязателен, должен равняться `end - start + 1`.
+- `ContentRange`: обязателен, должен равняться `bytes <start>-<end>/<object-size-in-bytes>`.
+- `AcceptRanges`: если присутствует, должен равняться `bytes`; если отсутствует, тест не падает, выводится `WARN`.
+
+Каждый диапазон печатается как `PASS` или `FAIL` с меткой, `start`, `end` и ожидаемой/фактической длиной; при несовпадении содержимого выводится байт первого расхождения (`cmp`); при несовпадении метаданных выводятся ожидаемое и фактическое значения. Отсутствие `AcceptRanges` печатается как `WARN` и не считается ошибкой. Скрипт не останавливается на первой ошибке — все проверки выполняются, а итоговый exit code ненулевой, если хотя бы одна проверка провалилась.
 
 Локальные temp-файлы (исходные данные, части, скачанные диапазоны) удаляются через trap. Незавершенные multipart uploads abort-ятся при выходе. Bucket не удаляется. S3 object удаляется только при `--cleanup`.
 
