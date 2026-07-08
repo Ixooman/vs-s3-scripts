@@ -160,13 +160,13 @@ Example:
 Очень короткая диагностическая проверка `CreateMultipartUpload` и `AbortMultipartUpload`.
 
 ```bash
-./test_multipart.sh
+./test_multipart.sh --bucket <bucket-name> [--endpoint <url>]
 ```
 
-Important: у этого скрипта нет CLI-параметров. Endpoint, bucket и key зашиты в файле:
+Скрипт принимает bucket обязательным параметром. Endpoint можно указать явно, иначе используется default:
 
-- endpoint: `http://192.168.10.81`
-- bucket: `test-bucket`
+- `--bucket <name>`: существующий bucket
+- `--endpoint <url>`: default `http://192.168.10.81`
 - key: `test-multipart-object.bin`
 
 Bucket должен существовать заранее. Скрипт не загружает parts и не создает объект, он только инициирует multipart upload и abort-ит его.

@@ -1,11 +1,65 @@
 #!/bin/bash
 
 # Simple multipart upload test script
-# Usage: ./test_multipart.sh
+# Usage: ./test_multipart.sh --bucket <bucket-name> [--endpoint <url>]
 
 ENDPOINT="http://192.168.10.81"
-BUCKET="test-bucket"
+BUCKET=""
 KEY="test-multipart-object.bin"
+
+usage() {
+    cat <<EOF
+Usage: $0 --bucket <bucket-name> [options]
+
+Required arguments:
+  --bucket <name>       S3 bucket name
+
+Optional arguments:
+  --endpoint <url>      S3 endpoint URL (default: http://192.168.10.81)
+  -h, --help            Show this help message
+
+Example:
+  $0 --bucket test-bucket
+  $0 --bucket test-bucket --endpoint http://192.168.10.81
+
+EOF
+    exit "${1:-1}"
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --endpoint)
+            if [[ -z "$2" || "$2" == --* ]]; then
+                echo "Error: --endpoint requires a value" >&2
+                usage
+            fi
+            ENDPOINT="$2"
+            shift 2
+            ;;
+        --bucket)
+            if [[ -z "$2" || "$2" == --* ]]; then
+                echo "Error: --bucket requires a value" >&2
+                usage
+            fi
+            BUCKET="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage 0
+            ;;
+        *)
+            echo "Error: Unknown option $1" >&2
+            usage
+            ;;
+    esac
+done
+
+# Validate required arguments
+if [[ -z "$BUCKET" ]]; then
+    echo "Error: Missing required argument --bucket" >&2
+    usage
+fi
 
 echo "Testing multipart upload support on $ENDPOINT"
 echo "================================================"
