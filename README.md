@@ -1,6 +1,8 @@
 # S3 Testing Scripts
 
-Набор bash-скриптов для полуавтоматического тестирования S3-совместимого API СХД VitiScale: проверка доступности, базовых операций, multipart upload, пределов размера объекта, массовой загрузки и очистки тестового стенда.
+Набор bash-скриптов для полуавтоматического тестирования S3-совместимого API: проверка доступности, базовых операций, multipart upload, пределов размера объекта, массовой загрузки и очистки тестового стенда.
+
+Данный набор скриптов не претендует на какую-либо полноту. Это просто удобные инструменты, которые я использую в работе.
 
 Скрипты рассчитаны на запуск из этой директории. Если endpoint не указан явно, большинство скриптов используют `http://192.168.10.81`. Все обращения к S3 выполняются через AWS CLI с `--no-verify-ssl`, поэтому набор ориентирован на тестовые стенды и self-signed TLS.
 
@@ -61,18 +63,18 @@ aws configure set default.output json
 
 ## Script Matrix
 
-| Script | Endpoint | Bucket | Debug | Cleanup | Size units |
-| --- | --- | --- | --- | --- | --- |
-| `check_connection.sh` | positional, default есть | не нужен | нет | нет | нет |
-| `base_check.sh` | positional, default есть | фиксированные test bucket names | нет | automatic trap | нет |
-| `spec_methods_tester.sh` | `-e`, required | авто: `s3-api-test-<timestamp>` | `-v` | automatic trap | internal 1KB/10MB/50MB |
-| `test_multipart.sh` | hard-coded | hard-coded `test-bucket` | нет | abort multipart only | нет |
-| `multipart_upload_check.sh` | `--endpoint`, default есть | `--bucket`, creates if missing | `--debug` | `--cleanup` for object, trap for temp/uploads | `mb`, `gb`, `tb` |
-| `max_object_size_probe.sh` | `--endpoint`, default есть | `--bucket`, creates if missing | нет | `--cleanup` | `kb`, `mb`, `gb` |
-| `max_object_multipart_probe.sh` | `--endpoint`, default есть | `--bucket`, creates if missing | `--debug` | `--cleanup` | `mb`, `gb`, `tb` |
-| `put_bunch_objects.sh` | `--endpoint`, default есть | `--bucket`, creates if missing | `--debug` | `--cleanup` for S3 objects, trap for local templates | `kb`, `mb`, `gb` |
-| `range_get_check.sh` | `--endpoint`, default есть | `--bucket`, creates if missing | `--debug` | `--cleanup` for the object, trap for temp files/parts, abort for multipart uploads | `mb`, `gb` for `--size`; `kb`, `mb`, `gb` for `--range-max` |
-| `cleanup_all.sh` | positional, default есть | all buckets on endpoint | нет | destructive by design | нет |
+| Script                          | Endpoint                   | Bucket                          | Debug     | Cleanup                                                                            | Size units                                                  |
+| ------------------------------- | -------------------------- | ------------------------------- | --------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `check_connection.sh`           | positional, default есть   | не нужен                        | нет       | нет                                                                                | нет                                                         |
+| `base_check.sh`                 | positional, default есть   | фиксированные test bucket names | нет       | automatic trap                                                                     | нет                                                         |
+| `spec_methods_tester.sh`        | `-e`, required             | авто: `s3-api-test-<timestamp>` | `-v`      | automatic trap                                                                     | internal 1KB/10MB/50MB                                      |
+| `test_multipart.sh`             | hard-coded                 | hard-coded `test-bucket`        | нет       | abort multipart only                                                               | нет                                                         |
+| `multipart_upload_check.sh`     | `--endpoint`, default есть | `--bucket`, creates if missing  | `--debug` | `--cleanup` for object, trap for temp/uploads                                      | `mb`, `gb`, `tb`                                            |
+| `max_object_size_probe.sh`      | `--endpoint`, default есть | `--bucket`, creates if missing  | нет       | `--cleanup`                                                                        | `kb`, `mb`, `gb`                                            |
+| `max_object_multipart_probe.sh` | `--endpoint`, default есть | `--bucket`, creates if missing  | `--debug` | `--cleanup`                                                                        | `mb`, `gb`, `tb`                                            |
+| `put_bunch_objects.sh`          | `--endpoint`, default есть | `--bucket`, creates if missing  | `--debug` | `--cleanup` for S3 objects, trap for local templates                               | `kb`, `mb`, `gb`                                            |
+| `range_get_check.sh`            | `--endpoint`, default есть | `--bucket`, creates if missing  | `--debug` | `--cleanup` for the object, trap for temp files/parts, abort for multipart uploads | `mb`, `gb` for `--size`; `kb`, `mb`, `gb` for `--range-max` |
+| `cleanup_all.sh`                | positional, default есть   | all buckets on endpoint         | нет       | destructive by design                                                              | нет                                                         |
 
 ## Connectivity and Compatibility
 
